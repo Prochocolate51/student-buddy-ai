@@ -1,0 +1,335 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>AI Study Assistant 🌟</title>
+<style>
+  :root{--bg:#000;--card:#111;--white:#fff;--muted:#888}
+  body{background:var(--bg);color:var(--white);font-family:Inter,system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial;margin:0}
+  header{text-align:center;padding:18px;font-size:1.9rem}
+  .grid{display:flex;flex-wrap:wrap;gap:18px;padding:14px;justify-content:center}
+  .col{background:var(--card);border-radius:12px;padding:18px;min-width:300px;flex:1 1 320px;min-height:78vh;box-shadow:0 6px 20px rgba(255,255,255,0.03)}
+  h2{text-align:center;margin:6px 0 14px}
+  textarea,input,select,button{width:100%;box-sizing:border-box;padding:10px;border-radius:8px;border:1px solid #222;margin:8px 0;background:#0f1720;color:var(--white)}
+  button{background:#fff;color:#000;font-weight:600;cursor:pointer}
+  button.ghost{background:transparent;color:var(--white);border:1px solid #333}
+  .flashcard{perspective:1000px;margin:14px 0;height:200px}
+  .inner{position:relative;width:100%;height:100%;transition:transform .6s;transform-style:preserve-3d;cursor:pointer;border-radius:12px}
+  .front,.back{position:absolute;inset:0;border-radius:12px;display:flex;align-items:center;justify-content:center;padding:18px;text-align:center;backface-visibility:hidden}
+  .front{background:#fff;color:#000}
+  .back{background:#111;color:#fff;transform:rotateY(180deg);border:1px solid #222}
+  .flipped .inner{transform:rotateY(180deg)}
+  .question-block{background:#0b0b0b;border-radius:10px;padding:12px;margin:10px 0}
+  .question{font-weight:700}
+  .answer-row{display:flex;gap:8px;align-items:center;margin-top:8px}
+  .answer-row input{flex:1;background:#fff;color:#000;padding:10px;border-radius:8px;border:1px solid #ccc}
+  .answer-row button{width:110px;background:#fff;color:#000;border-radius:8px;font-weight:700}
+  .result{margin-top:8px;font-weight:700}
+  .small{font-size:13px;color:var(--muted)}
+  @media(max-width:900px){.col{min-width:92%}}
+</style>
+</head>
+<body>
+  <header>AI Study Assistant 🌟</header>
+
+  <div class="grid">
+    <div class="col" id="notesCol">
+      <h2>📝 Notes</h2>
+      <textarea id="notes" rows="10" placeholder="Paste or type your study notes here..."></textarea>
+      <label class="small">How many items to generate</label>
+      <select id="count"><option>5</option><option>8</option><option>10</option></select>
+      <button id="generateBtn">✨ Generate Flashcards & Questions</button>
+      <button id="regenBtn" class="ghost">🔁 Regenerate Questions</button>
+      <div id="status" class="small">Ready — generator analyzes text for key concepts and makes logical questions.</div>
+    </div>
+
+    <div class="col" id="flashCol">
+      <h2>📚 Flashcards</h2>
+      <div id="flashcardsArea"><div class="small">No flashcards yet.</div></div>
+    </div>
+
+    <div class="col" id="quesCol">
+      <h2>❓ Quiz Questions</h2>
+      <div id="questionsArea"><div class="small">No questions yet.</div></div>
+    </div>
+  </div>
+
+<script>
+/* 
+  Improved logical question generator (rule-based):
+  - Extracts candidate noun phrases and verbs
+  - Classifies sentences to generate definition/process/cause/effect/example/comparison/application questions
+  - Ensures questions are independent and meaningful
+  - Regenerate button refreshes questions only
+  - Offline, no external models
+*/
+
+/* ---------- Utilities & NLP-ish helpers (lightweight) ---------- */
+
+const STOPWORDS = new Set([
+  'the','and','for','with','that','this','these','those','a','an','in','on','at','by','to','of','is','are','was','were','be','as','it','its','from','which','or','such','has','have'
+]);
+
+function splitSentences(text){
+  return text.split(/[.?!]\s*/).map(s=>s.trim()).filter(Boolean);
+}
+
+// tokenizes, lower-case, strips non-letters
+function tokens(s){
+  return s.toLowerCase().split(/\W+/).filter(Boolean);
+}
+
+// choose the most informative words (non-stopword, length, freq)
+function topKeywords(text, limit=15){
+  const t = tokens(text);
+  const freq = {};
+  t.forEach(w=>{ if(!STOPWORDS.has(w)) freq[w]=(freq[w]||0)+1; });
+  return Object.entries(freq).sort((a,b)=>b[1]-a[1]).slice(0,limit).map(x=>x[0]);
+}
+
+// extract candidate noun phrases (simple heuristic): sequences of words not stopwords and length>2
+function extractNounPhrases(sentence){
+  const parts = sentence.split(/\s+/);
+  const phrases=[];
+  let cur=[];
+  for(let p of parts){
+    const w = p.replace(/[^a-zA-Z]/g,'');
+    if(!w) { if(cur.length){ phrases.push(cur.join(' ')); cur=[]; } continue; }
+    if(STOPWORDS.has(w.toLowerCase())){
+      if(cur.length){ phrases.push(cur.join(' ')); cur=[]; }
+    } else {
+      cur.push(w);
+      // keep phrase length at most 4 words
+      if(cur.length>=4){ phrases.push(cur.join(' ')); cur=[]; }
+    }
+  }
+  if(cur.length) phrases.push(cur.join(' '));
+  // filter weird single letters, return unique, prefer longer phrases first
+  const uniq = [...new Set(phrases.map(p=>p.trim()).filter(p=>p.length>1 && !/^\d+$/.test(p)))];
+  return uniq.sort((a,b)=>b.split(' ').length - a.split(' ').length);
+}
+
+// parse verbs/indicators
+function sentenceSignals(s){
+  const low = s.toLowerCase();
+  return {
+    hasBecause: /\bbecause\b|\bdue to\b/.test(low),
+    hasProcess: /\bprocess(es)?\b|\bprocess of\b|\bconvert(s)?\b|\bproduce(s)?\b|\bcreate(s)?\b/.test(low),
+    hasFunction: /\bfunction\b|\brole\b|\bpurpose\b/.test(low),
+    hasExample: /\bfor example\b|\bsuch as\b|\bfor instance\b/.test(low),
+    hasWhen: /\bwhen\b|\bduring\b|\bafter\b|\bbefore\b/.test(low),
+    hasWhere: /\bin\b|\bwithin\b|\bfound\b|\blocated\b|\bwhere\b/.test(low)
+  };
+}
+
+/* ---------- Question templates by type ---------- */
+
+const Q_TEMPLATES = {
+  definition: [t=>`What is ${t}?`, t=>`Define ${t}.`, t=>`How would you define ${t}?`],
+  process: [t=>`How does ${t} work?`, t=>`What happens during ${t}?`, t=>`Explain the process of ${t}.`],
+  cause: [t=>`Why does ${t} happen?`, t=>`What causes ${t}?`],
+  function: [t=>`What is the role/function of ${t}?`, t=>`What does ${t} do?`],
+  example: [t=>`Give an example of ${t}.`, t=>`Which situation shows ${t}?`],
+  whenwhere: [t=>`When or where does ${t} occur?`, t=>`Under what conditions does ${t} happen?`],
+  compare: [t=>`How is ${t} different from related concepts?`, t=>`Compare ${t} with similar terms.`],
+  explain: [t=>`Explain ${t} in your own words.`, t=>`Describe the importance of ${t}.`]
+};
+
+/* choose template randomly */
+function chooseTemplate(type, topic){
+  const list = Q_TEMPLATES[type];
+  if(!list) return `Explain ${topic}.`;
+  const tpl = list[Math.floor(Math.random()*list.length)];
+  return tpl(topic);
+}
+
+/* ---------- Core generator: analyze + produce ---------- */
+
+function analyzeNotes(notes){
+  const sentences = splitSentences(notes);
+  const keywords = topKeywords(notes,50);
+  // collect noun phrase candidates across sentences
+  const phrasePool = [];
+  sentences.forEach(s=>{
+    const nps = extractNounPhrases(s);
+    nps.forEach(np=> phrasePool.push({phrase:np, sentence:s, signals:sentenceSignals(s)}));
+  });
+  return { sentences, keywords, phrasePool };
+}
+
+/* For each desired question, pick a sentence/phrase and determine question type by signals */
+function generateLogicalQuestions(notes, count){
+  const analysis = analyzeNotes(notes);
+  const pool = analysis.phrasePool.length ? analysis.phrasePool : analysis.sentences.map(s=>({phrase: s.split(' ').slice(0,3).join(' '), sentence: s, signals: sentenceSignals(s)}));
+  const questions = [];
+  const used = new Set();
+
+  // priority: try to generate diverse types across available sentences
+  const types = ['definition','process','cause','function','example','whenwhere','compare','explain'];
+
+  // simple strategy: iterate sentences and create best-fit Q for each
+  for(let i=0, j=0; i < count && j < pool.length*2; j++){
+    const idx = j % pool.length;
+    const item = pool[idx];
+    // avoid repeating same phrase
+    const phrase = item.phrase.replace(/\s+/g,' ').trim();
+    if(used.has(phrase.toLowerCase())) { continue; }
+
+    const sig = item.signals;
+    let qText = null;
+    let qType = null;
+
+    // heuristics to pick question type
+    if(sig.hasBecause) { qText = chooseTemplate('cause', phrase); qType='cause'; }
+    else if(sig.hasProcess) { qText = chooseTemplate('process', phrase); qType='process'; }
+    else if(sig.hasFunction) { qText = chooseTemplate('function', phrase); qType='function'; }
+    else if(sig.hasExample) { qText = chooseTemplate('example', phrase); qType='example'; }
+    else if(sig.hasWhen || sig.hasWhere) { qText = chooseTemplate('whenwhere', phrase); qType='whenwhere'; }
+    else {
+      // fallback: alternate definition/explain/compare/process for variety
+      const pick = (i % 3 === 0) ? 'definition' : (i % 3 === 1) ? 'explain' : 'compare';
+      qText = chooseTemplate(pick, phrase); qType = pick;
+    }
+
+    // quick sanity: don't produce "What is the" where phrase is generic like 'the' or number
+    if(/^\d+$/.test(phrase) || phrase.length < 2 || /^(the|this|that|these|those)$/i.test(phrase.split(' ')[0])) {
+      j++; continue;
+    }
+
+    // add
+    questions.push({ q: qText, a: item.sentence, meta:{phrase, type:qType} });
+    used.add(phrase.toLowerCase());
+    i++;
+  }
+
+  // if still not enough, add generic explain questions based on top keywords
+  let k=0;
+  while(questions.length < count && k < analysis.keywords.length){
+    const kw = analysis.keywords[k++];
+    if(!kw || kw.length < 3) continue;
+    if(questions.some(x=>x.q.toLowerCase().includes(kw))) continue;
+    const q = chooseTemplate('explain', kw);
+    questions.push({ q, a: `Refer to notes about ${kw}.`, meta:{phrase:kw, type:'explain'} });
+  }
+
+  return questions.slice(0,count);
+}
+
+/* ---------- Simple answer checking (lenient + semantic-ish heuristics) ---------- */
+
+function normalizeText(s){
+  return s.toLowerCase().replace(/[^a-z0-9\s]/g,' ').replace(/\s+/g,' ').trim();
+}
+
+function answerSimilarity(user, reference){
+  // normalize, count shared meaningful tokens (ignore stopwords)
+  const a = normalizeText(user).split(' ').filter(w=>w && !STOPWORDS.has(w));
+  const b = normalizeText(reference).split(' ').filter(w=>w && !STOPWORDS.has(w));
+  if(b.length === 0) return 0;
+  let common = 0;
+  const bset = new Set(b);
+  a.forEach(w=>{ if(bset.has(w)) common++; });
+  // also reward presence of root word matches and synonyms (very naive)
+  const ratio = common / b.length;
+  return ratio;
+}
+
+/* ---------- Rendering & UI ---------- */
+
+function renderFlashcardsFromSentences(sentences, count){
+  const area = document.getElementById('flashcardsArea');
+  area.innerHTML = '';
+  const slice = sentences.slice(0, count);
+  if(slice.length === 0){ area.innerHTML = '<div class="small">No flashcards available.</div>'; return; }
+  slice.forEach(sent=>{
+    // intelligently pick a front: prefer up to phrase before "is/are/means/refers"
+    let front = '';
+    const m = sent.match(/^(.*?\b(?:is|are|means|refers to)\b)/i);
+    if(m) front = m[1].trim();
+    else {
+      // choose first meaningful 6 words (drop leading stopwords)
+      const parts = sent.split(/\s+/).filter(Boolean);
+      let idx = 0;
+      while(idx < parts.length && STOPWORDS.has(parts[idx].toLowerCase())) idx++;
+      front = parts.slice(idx, idx+6).join(' ');
+      if(parts.length > idx+6) front += '...';
+    }
+    const card = document.createElement('div'); card.className = 'flashcard';
+    card.innerHTML = `<div class="inner"><div class="front">${escapeHtml(front)}</div><div class="back">${escapeHtml(sent)}</div></div>`;
+    card.addEventListener('click', ()=>card.classList.toggle('flipped'));
+    area.appendChild(card);
+  });
+}
+
+function renderQuestions(questions){
+  const area = document.getElementById('questionsArea');
+  area.innerHTML = '';
+  if(!questions.length){ area.innerHTML = '<div class="small">No questions yet.</div>'; return; }
+  questions.forEach((it, idx)=>{
+    const block = document.createElement('div'); block.className='question-block';
+    block.innerHTML = `
+      <div class="question">${escapeHtml(it.q)}</div>
+      <div class="answer-row">
+        <input id="ans_in_${idx}" placeholder="Type your answer...">
+        <button id="check_btn_${idx}">Check</button>
+      </div>
+      <div class="result" id="result_${idx}"></div>
+    `;
+    area.appendChild(block);
+    document.getElementById(`check_btn_${idx}`).addEventListener('click', ()=>{
+      const user = document.getElementById(`ans_in_${idx}`).value.trim();
+      const resEl = document.getElementById(`result_${idx}`);
+      if(!user){ resEl.textContent = 'Type an answer first.'; resEl.style.color = '#ccc'; return; }
+      const sim = answerSimilarity(user, it.a);
+      if(sim >= 0.45){
+        resEl.textContent = `✅ Correct (match ${Math.round(sim*100)}%)`;
+        resEl.style.color = 'lightgreen';
+      } else if(sim >= 0.25){
+        resEl.textContent = `⚠️ Partially correct (match ${Math.round(sim*100)}%) — close.`;
+        resEl.style.color = '#ffd966';
+      } else {
+        resEl.textContent = `❌ Not close enough — example answer: ${it.a}`;
+        resEl.style.color = '#ff6b6b';
+      }
+    });
+  });
+}
+
+/* ---------- Small helpers ---------- */
+
+function escapeHtml(s){ return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+
+/* ---------- Wiring buttons ---------- */
+
+let lastSentences = [];
+
+document.getElementById('generateBtn').addEventListener('click', ()=>{
+  const notes = document.getElementById('notes').value.trim();
+  if(!notes){ alert('Paste your notes first.'); return; }
+  const count = parseInt(document.getElementById('count').value) || 5;
+  const sentences = splitSentences(notes);
+  lastSentences = sentences;
+  // flashcards: use top sentences (order preserved)
+  renderFlashcardsFromSentences(sentences, count);
+  // questions: generate logically
+  const qs = generateLogicalQuestions(notes, count);
+  renderQuestions(qs);
+  document.getElementById('status').textContent = 'Generated — questions analyze the text for concepts and relations.';
+});
+
+// Regenerate questions only (random new set each time)
+document.getElementById('regenBtn').addEventListener('click', ()=>{
+  const notes = document.getElementById('notes').value.trim();
+  if(!notes){ alert('Paste your notes first.'); return; }
+  const count = parseInt(document.getElementById('count').value) || 5;
+  const qs = generateLogicalQuestions(notes, count);
+  renderQuestions(qs);
+  document.getElementById('status').textContent = 'Questions regenerated.';
+});
+
+/* initial small note */
+document.getElementById('status').textContent = 'Ready — paste notes and click Generate. Questions will be logical and varied.';
+</script>
+</body>
+</html>
